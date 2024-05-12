@@ -556,14 +556,13 @@ class BackboneUpdate(nn.Module):
 
         return update
 
-class IpaScore(nn.Module):
+class PredModel(nn.Module):
 
-    def __init__(self, model_conf, diffuser):
-        super(IpaScore, self).__init__()
+    def __init__(self, model_conf):
+        super(PredModel, self).__init__()
         self._model_conf = model_conf
         ipa_conf = model_conf.ipa
         self._ipa_conf = ipa_conf
-        self.diffuser = diffuser
 
         self.scale_pos = lambda x: x * ipa_conf.coordinate_scaling
         self.scale_rigids = lambda x: x.apply_trans_fn(self.scale_pos)
@@ -608,7 +607,7 @@ class IpaScore(nn.Module):
 
         self.torsion_pred = TorsionAngles(ipa_conf.c_s, 1)
 
-    def forward(self, init_node_embed, edge_embed, input_feats):
+    def forward(self, init_node_embed,edge_embed,input_feats):
         node_mask = input_feats['res_mask'].type(torch.float32)
         diffuse_mask = (1 - input_feats['fixed_mask'].type(torch.float32)) * node_mask
         edge_mask = node_mask[..., None] * node_mask[..., None, :]
@@ -643,10 +642,22 @@ class IpaScore(nn.Module):
             curr_rigids = curr_rigids.compose_q_update_vec(
                 rigid_update, diffuse_mask[..., None])
 
-            if b < self._ipa_conf.num_blocks-1:
+            if b < self._ipa_conf.num_blocks - 1:
                 edge_embed = self.trunk[f'edge_transition_{b}'](
                     node_embed, edge_embed)
                 edge_embed *= edge_mask[..., None]
+
+        _, psi_pred = self.torsion_pred(node_embed)
+        return node_embed,edge_embed,psi_pred,curr_rigids,init_rigids
+
+class ScoreModel(nn.Module):
+    def __init__(self,diffuser):
+        super(ScoreModel,self).__init__()
+        self.diffuser = diffuser
+
+    def forward(self, init_rigids, curr_rigids, input_feats):
+        node_mask = input_feats['res_mask'].type(torch.float32)
+
         rot_score = self.diffuser.calc_rot_score(
             init_rigids.get_rots(),
             curr_rigids.get_rots(),
@@ -662,11 +673,10 @@ class IpaScore(nn.Module):
             use_torch=True,
         )
         trans_score = trans_score * node_mask[..., None]
-        _, psi_pred = self.torsion_pred(node_embed)
-        model_out = {
-            'psi': psi_pred,
-            'rot_score': rot_score,
-            'trans_score': trans_score,
-            'final_rigids': curr_rigids,
-        }
-        return model_out
+        # model_out = {
+        #     'psi': psi_pred,
+        #     'rot_score': rot_score,
+        #     'trans_score': trans_score,
+        #     'final_rigids': curr_rigids,
+        # }
+        return rot_score, trans_score

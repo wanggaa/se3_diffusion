@@ -1,298 +1,106 @@
-# SE(3) diffusion model with application to protein backbone generation
+# ProteinMPNN
+![ProteinMPNN](https://docs.google.com/drawings/d/e/2PACX-1vTtnMBDOq8TpHIctUfGN8Vl32x5ISNcPKlxjcQJF2q70PlaH2uFlj2Ac4s3khnZqG1YxppdMr0iTyk-/pub?w=889&h=358)
+Read [ProteinMPNN paper](https://www.biorxiv.org/content/10.1101/2022.06.03.494563v1).
 
-## Description
-Implementation for "SE(3) diffusion model with application to protein backbone generation" [arxiv link](https://arxiv.org/abs/2302.02277).
-While our work is tailored towards protein backbone generation, it is in principle applicable to other domains where SE(3) is utilized.
+To run ProteinMPNN clone this github repo and install Python>=3.0, PyTorch, Numpy. 
 
-> For those interested in non-protein applications, we have prepared a minimal notebook with SO(3) diffusion
-> https://colab.research.google.com/github/blt2114/SO3_diffusion_example/blob/main/SO3_diffusion_example.ipynb 
+Full protein backbone models: `vanilla_model_weights/v_48_002.pt, v_48_010.pt, v_48_020.pt, v_48_030.pt`.
 
-We have codebase updates we plan to get around to.
+CA only models: `ca_model_weights/v_48_002.pt, v_48_010.pt, v_48_020.pt`. Enable flag `--ca_only` to use these models.
 
-* [In the works] Refactor score framework to be more readable and match the paper's math. See the [refactor branch](https://github.com/jasonkyuyim/se3_diffusion/tree/unsupported_refactor).
-* Set-up easily downloadable training data.
+Helper scripts: `helper_scripts` - helper functions to parse PDBs, assign which chains to design, which residues to fix, adding AA bias, tying residues etc.
 
-We welcome pull requests (especially bug fixes) and contributions.
-We will try out best to improve readability and answer questions!
-
-If you use our work then please cite
+Code organization:
+* `protein_mpnn_run.py` - the main script to initialialize and run the model.
+* `protein_mpnn_utils.py` - utility functions for the main script.
+* `examples/` - simple code examples.
+* `inputs/` - input PDB files for examples
+* `outputs/` - outputs from examples
+* `colab_notebooks/` - Google Colab examples
+* `training/` - code and data to retrain the model
+-----------------------------------------------------------------------------------------------------
+Input flags for `protein_mpnn_run.py`:
 ```
-@article{yim2023se,
-  title={SE (3) diffusion model with application to protein backbone generation},
-  author={Yim, Jason and Trippe, Brian L and De Bortoli, Valentin and Mathieu, Emile and Doucet, Arnaud and Barzilay, Regina and Jaakkola, Tommi},
-  journal={arXiv preprint arXiv:2302.02277},
-  year={2023}
+    argparser.add_argument("--ca_only", action="store_true", default=False, help="Parse CA-only structures and use CA-only models (default: false)")
+    argparser.add_argument("--path_to_model_weights", type=str, default="", help="Path to model weights folder;")
+    argparser.add_argument("--model_name", type=str, default="v_48_020", help="ProteinMPNN model name: v_48_002, v_48_010, v_48_020, v_48_030; v_48_010=version with 48 edges 0.10A noise")
+    argparser.add_argument("--seed", type=int, default=0, help="If set to 0 then a random seed will be picked;")
+    argparser.add_argument("--save_score", type=int, default=0, help="0 for False, 1 for True; save score=-log_prob to npy files")
+    argparser.add_argument("--save_probs", type=int, default=0, help="0 for False, 1 for True; save MPNN predicted probabilites per position")
+    argparser.add_argument("--score_only", type=int, default=0, help="0 for False, 1 for True; score input backbone-sequence pairs")
+    argparser.add_argument("--conditional_probs_only", type=int, default=0, help="0 for False, 1 for True; output conditional probabilities p(s_i given the rest of the sequence and backbone)")
+    argparser.add_argument("--conditional_probs_only_backbone", type=int, default=0, help="0 for False, 1 for True; if true output conditional probabilities p(s_i given backbone)")
+    argparser.add_argument("--unconditional_probs_only", type=int, default=0, help="0 for False, 1 for True; output unconditional probabilities p(s_i given backbone) in one forward pass")
+    argparser.add_argument("--backbone_noise", type=float, default=0.00, help="Standard deviation of Gaussian noise to add to backbone atoms")
+    argparser.add_argument("--num_seq_per_target", type=int, default=1, help="Number of sequences to generate per target")
+    argparser.add_argument("--batch_size", type=int, default=1, help="Batch size; can set higher for titan, quadro GPUs, reduce this if running out of GPU memory")
+    argparser.add_argument("--max_length", type=int, default=200000, help="Max sequence length")
+    argparser.add_argument("--sampling_temp", type=str, default="0.1", help="A string of temperatures, 0.2 0.25 0.5. Sampling temperature for amino acids. Suggested values 0.1, 0.15, 0.2, 0.25, 0.3. Higher values will lead to more diversity.")
+    argparser.add_argument("--out_folder", type=str, help="Path to a folder to output sequences, e.g. /home/out/")
+    argparser.add_argument("--pdb_path", type=str, default='', help="Path to a single PDB to be designed")
+    argparser.add_argument("--pdb_path_chains", type=str, default='', help="Define which chains need to be designed for a single PDB ")
+    argparser.add_argument("--jsonl_path", type=str, help="Path to a folder with parsed pdb into jsonl")
+    argparser.add_argument("--chain_id_jsonl",type=str, default='', help="Path to a dictionary specifying which chains need to be designed and which ones are fixed, if not specied all chains will be designed.")
+    argparser.add_argument("--fixed_positions_jsonl", type=str, default='', help="Path to a dictionary with fixed positions")
+    argparser.add_argument("--omit_AAs", type=list, default='X', help="Specify which amino acids should be omitted in the generated sequence, e.g. 'AC' would omit alanine and cystine.")
+    argparser.add_argument("--bias_AA_jsonl", type=str, default='', help="Path to a dictionary which specifies AA composion bias if neededi, e.g. {A: -1.1, F: 0.7} would make A less likely and F more likely.")
+    argparser.add_argument("--bias_by_res_jsonl", default='', help="Path to dictionary with per position bias.")
+    argparser.add_argument("--omit_AA_jsonl", type=str, default='', help="Path to a dictionary which specifies which amino acids need to be omited from design at specific chain indices")
+    argparser.add_argument("--pssm_jsonl", type=str, default='', help="Path to a dictionary with pssm")
+    argparser.add_argument("--pssm_multi", type=float, default=0.0, help="A value between [0.0, 1.0], 0.0 means do not use pssm, 1.0 ignore MPNN predictions")
+    argparser.add_argument("--pssm_threshold", type=float, default=0.0, help="A value between -inf + inf to restric per position AAs")
+    argparser.add_argument("--pssm_log_odds_flag", type=int, default=0, help="0 for False, 1 for True")
+    argparser.add_argument("--pssm_bias_flag", type=int, default=0, help="0 for False, 1 for True")
+    argparser.add_argument("--tied_positions_jsonl", type=str, default='', help="Path to a dictionary with tied positions")
+
+```
+-----------------------------------------------------------------------------------------------------
+For example to make a conda environment to run ProteinMPNN:
+* `conda create --name mlfold` - this creates conda environment called `mlfold`
+* `source activate mlfold` - this activate environment
+* `conda install pytorch torchvision torchaudio cudatoolkit=11.3 -c pytorch` - install pytorch following steps from https://pytorch.org/
+-----------------------------------------------------------------------------------------------------
+These are provided `examples/`:
+* `submit_example_1.sh` - simple monomer example 
+* `submit_example_2.sh` - simple multi-chain example
+* `submit_example_3.sh` - directly from the .pdb path
+* `submit_example_3_score_only.sh` - return score only (model's uncertainty)
+* `submit_example_4.sh` - fix some residue positions
+* `submit_example_4_non_fixed.sh` - specify which positions to design
+* `submit_example_5.sh` - tie some positions together (symmetry)
+* `submit_example_6.sh` - homooligomer example
+* `submit_example_7.sh` - return sequence unconditional probabilities (PSSM like)
+* `submit_example_8.sh` - add amino acid bias
+-----------------------------------------------------------------------------------------------------
+Output example:
+```
+>3HTN, score=1.1705, global_score=1.2045, fixed_chains=['B'], designed_chains=['A', 'C'], model_name=v_48_020, git_hash=015ff820b9b5741ead6ba6795258f35a9c15e94b, seed=37
+NMYSYKKIGNKYIVSINNHTEIVKALNAFCKEKGILSGSINGIGAIGELTLRFFNPKTKAYDDKTFREQMEISNLTGNISSMNEQVYLHLHITVGRSDYSALAGHLLSAIQNGAGEFVVEDYSERISRTYNPDLGLNIYDFER/NMYSYKKIGNKYIVSINNHTEIVKALNAFCKEKGILSGSINGIGAIGELTLRFFNPKTKAYDDKTFREQMEISNLTGNISSMNEQVYLHLHITVGRSDYSALAGHLLSAIQNGAGEFVVEDYSERISRTYNPDLGLNIYDFER
+>T=0.1, sample=1, score=0.7291, global_score=0.9330, seq_recovery=0.5736
+NMYSYKKIGNKYIVSINNHTEIVKALKKFCEEKNIKSGSVNGIGSIGSVTLKFYNLETKEEELKTFNANFEISNLTGFISMHDNKVFLDLHITIGDENFSALAGHLVSAVVNGTCELIVEDFNELVSTKYNEELGLWLLDFEK/NMYSYKKIGNKYIVSINNHTDIVTAIKKFCEDKKIKSGTINGIGQVKEVTLEFRNFETGEKEEKTFKKQFTISNLTGFISTKDGKVFLDLHITFGDENFSALAGHLISAIVDGKCELIIEDYNEEINVKYNEELGLYLLDFNK
+>T=0.1, sample=2, score=0.7414, global_score=0.9355, seq_recovery=0.6075
+NMYKYKKIGNKYIVSINNHTEIVKAIKEFCKEKNIKSGTINGIGQVGKVTLRFYNPETKEYTEKTFNDNFEISNLTGFISTYKNEVFLHLHITFGKSDFSALAGHLLSAIVNGICELIVEDFKENLSMKYDEKTGLYLLDFEK/NMYKYKKIGNKYVVSINNHTEIVEALKAFCEDKKIKSGTVNGIGQVSKVTLKFFNIETKESKEKTFNKNFEISNLTGFISEINGEVFLHLHITIGDENFSALAGHLLSAVVNGEAILIVEDYKEKVNRKYNEELGLNLLDFNL
+```
+* `score` - average over residues that were designed negative log probability of sampled amino acids
+* `global score` - average over all residues in all chains negative log probability of sampled/fixed amino acids
+* `fixed_chains` - chains that were not designed (fixed)
+* `designed_chains` - chains that were redesigned
+* `model_name/CA_model_name` - model name that was used to generate results, e.g. `v_48_020`
+* `git_hash` - github version that was used to generate outputs
+* `seed` - random seed
+* `T=0.1` - temperature equal to 0.1 was used to sample sequences
+* `sample` - sequence sample number 1, 2, 3...etc
+-----------------------------------------------------------------------------------------------------
+```
+@article{dauparas2022robust,
+  title={Robust deep learning--based protein sequence design using ProteinMPNN},
+  author={Dauparas, Justas and Anishchenko, Ivan and Bennett, Nathaniel and Bai, Hua and Ragotte, Robert J and Milles, Lukas F and Wicky, Basile IM and Courbet, Alexis and de Haas, Rob J and Bethel, Neville and others},
+  journal={Science},
+  volume={378},
+  number={6615},  
+  pages={49--56},
+  year={2022},
+  publisher={American Association for the Advancement of Science}
 }
 ```
-
-
-Other protein diffusion codebases:
-* Pretrained protein backbone diffusion: [RFdiffusion](https://github.com/RosettaCommons/RFdiffusion)
-* Protein-ligand docking: [DiffDock](https://github.com/gcorso/DiffDock)
-* Protein torsion angles: [FoldingDiff](https://github.com/microsoft/foldingdiff/)
-* Protein C-alpha backbone generation: [ProtDiff/SMCDiff](https://github.com/blt2114/ProtDiff_SMCDiff)
-
-LICENSE: MIT
-
-![framediff-landing-page](https://github.com/jasonkyuyim/se3_diffusion/blob/master/media/denoising.gif)
-
-## Update
-
-### June 27, 2023
-
-- **Bucketize bug**. We discovered an unfortunate bug in the SO3 component of the score approximation computation. The issue was the use of `torch.bucketize` when accessing cached IGSO3 density values `torch_score` of `SO3Diffuser`; since the `bucketize` function does not track gradients, this operation effectively introduced a stopgrad on the angle of rotation component of the rotation score thereby expectedly blocking some gradients during training. We have fixed this now but it has caused model performance to change. 
-- **Clustered training.** We added the ability use clustered data during training. We found this to greatly improve sample diversity. See [Downloading PDB clusters](#downloading-pdb-clusters).
-- **New configs**. 
-  - `config/base.yaml` updated with the best parameters we have found. They surpass the ICML published results (see table). The changes are the following:
-    - Batching with `experiment.sampling_mode=cluster_time_batch`.
-    - A new rotation loss that includes explicit penalties of errors in the axis and angle components of the loss on conditional score estimate `experiment.separate_rot_loss=True`. This was part of the published model with the bug that we accidentally found to help. We found it beneficial to down-weight the angle term of the rotation loss, `experiment.rot_loss_weight=0.5`, and turn off the angle term for t<0.2, `experiment.rot_loss_t_threshold=0.2`. Though heuristic, we find this loss to further outperform the DSM loss by our metrics.
-  - `config/pure_dsm.yaml` same as `config/base.yaml` except has `experiment.separate_rot_loss=False` and instead uses the DSM rotation loss described in our paper, but without the `bucketize` bug.
-  - `config/icml_published.yaml` in case one wants to reproduce results from the ICML paper.
-
-We are still running some experiments to verify these improvements but we wanted to get this out sooner for researchers building on our codebase.
-Here is a table of our preliminary results so far:
-
-|                            | icml_published.yaml | base.yaml |
-| -------------------------- | ------------------- | --------- |
-| Designability (scRMSD < 2) | 0.29                | 0.34      |
-| Diversity (TM cutoff 0.5)  | 0.43                | 0.61      |
-
-We fine-tuned one of our checkpoints for the `base.yaml` results. `pure_dsm.yaml` model is training.
-We will update the table of `base.yaml` once it is finished training from scratch (unfortunately this takes at least a week).
-There's pretty strong signal that our new settings are showing large improvements across our metrics.
-
-The weights used to get the `icml_published.yaml` results are in `weights/paper_weights.pth` while the weights to get the `base.yaml`results are in `weights/best_weights.pth`.
-
-The authors are currently all very busy until the Fall (Jason is currently interning).
-However, we are committed to answering questions and fixing any bugs.
-Please email us or raise an issue if you have any concerns or questions.
-
-# Table of **Contents**
-- [SE(3) diffusion model with application to protein backbone generation](#se3-diffusion-model-with-application-to-protein-backbone-generation)
-  - [Description](#description)
-  - [Update](#update)
-    - [June 27, 2023](#june-27-2023)
-- [Table of **Contents**](#table-of-contents)
-- [Installation](#installation)
-    - [Third party source code](#third-party-source-code)
-- [Inference](#inference)
-- [Training](#training)
-    - [Downloading the PDB for training](#downloading-the-pdb-for-training)
-    - [Downloading PDB clusters](#downloading-pdb-clusters)
-    - [Batching modes](#batching-modes)
-    - [Launching training](#launching-training)
-    - [Intermittent evaluation](#intermittent-evaluation)
-- [Acknowledgements](#acknowledgements)
-
-
-# Installation
-
-We recommend [miniconda](https://docs.conda.io/en/main/miniconda.html) (or anaconda).
-Run the following to install a conda environment with the necessary dependencies.
-```bash
-conda env create -f se3.yml
-```
-
-Next, we recommend installing our code as a package. To do this, run the following.
-```
-pip install -e .
-```
-
-### Third party source code
-
-Our repo keeps a fork of [OpenFold](https://github.com/aqlaboratory/openfold) since we made a few changes to the source code.
-Likewise, we keep a fork of [ProteinMPNN](https://github.com/dauparas/ProteinMPNN).
-Each of these codebases are actively under development and you may want to refork.
-We use copied and adapted several files from the [AlphaFold](https://github.com/deepmind/alphafold) primarily in `/data/`, and have left the DeepMind license at the top of these files.
-For a differentiable pytorch implementation of the Logarithmic map on SO(3) we adapted two functions form [geomstats](https://github.com/geomstats/geomstats).
-Go give these repos a star if you use this codebase!
-
-# Inference
-
-`inference_se3_diffusion.py` is the inference script. It utilizes [Hydra](https://hydra.cc).
-Training can be done with the following.
-```python
-python experiments/inference_se3_diffusion.py
-```
-The config for inference is in `config/inference.yaml`.
-See the config for different inference options.
-By default, inference will use the published paper weights in `weights/paper_weights.pth`.
-Simply change the `weights_path` to use your custom weights.
-```yaml
-inference:
-    weights_path: <path>
-```
-Samples will be saved to `output_dir` in the `inference.yaml`. By default it is
-set to `./inference_outputs/`. Sample outputs will be saved as follows,
-
-```shell
-inference_outputs
-└── 12D_02M_2023Y_20h_46m_13s           # Date time of inference.
-    ├── inference_conf.yaml             # Config used during inference.
-    └── length_100                      # Sampled length 
-        ├── sample_0                    # Sample ID for length
-        │   ├── bb_traj_1.pdb           # x_{t-1} diffusion trajectory
-        │   ├── sample_1.pdb            # Final sample
-        │   ├── self_consistency        # Self consistency results        
-        │   │   ├── esmf                # ESMFold predictions using ProteinMPNN sequences
-        │   │   │   ├── sample_0.pdb
-        │   │   │   ├── sample_1.pdb
-        │   │   │   ├── sample_2.pdb
-        │   │   │   ├── sample_3.pdb
-        │   │   │   ├── sample_4.pdb
-        │   │   │   ├── sample_5.pdb
-        │   │   │   ├── sample_6.pdb
-        │   │   │   ├── sample_7.pdb
-        │   │   │   └── sample_8.pdb
-        │   │   ├── parsed_pdbs.jsonl   # Parsed chains for ProteinMPNN
-        │   │   ├── sample_1.pdb
-        │   │   ├── sc_results.csv      # Summary metrics CSV 
-        │   │   └── seqs                
-        │   │       └── sample_1.fa     # ProteinMPNN sequences
-        │   └── x0_traj_1.pdb           # x_0 model prediction trajectory
-        └── sample_1                    # Next sample
-```
-
-# Training
-
-### Downloading the PDB for training
-To get the training dataset, first download PDB then preprocess it with our provided scripts.
-PDB can be downloaded from RCSB: https://www.wwpdb.org/ftp/pdb-ftp-sites#rcsbpdb.
-Our scripts assume you download in **mmCIF format**.
-Navigate down to "Download Protocols" and follow the instructions depending on your location.
-
-> WARNING: Downloading PDB can take up to 1TB of space.
-
-After downloading, you should have a directory formatted like this:
-https://files.rcsb.org/pub/pdb/data/structures/divided/mmCIF/ 
-```
-00/
-01/
-02/
-..
-zz/
-```
-In this directory, unzip all the files: 
-```
-gzip -d **/*.gz
-```
-Then run the following with <path_pdb_dir> replaced with the location of PDB.
-```python
-python process_pdb_dataset.py --mmcif_dir <pdb_dir> 
-```
-See the script for more options. Each mmCIF will be written as a pickle file that
-we read and process in the data loading pipeline. A `metadata.csv` will be saved
-that contains the pickle path of each example as well as additional information
-about each example for faster filtering.
-
-For PDB files, we provide some starter code in `process_pdb_files.py`  of how to
-modify `process_pdb_dataset.py` to work with PDB files (as we did at an earlier
-point in the project). **This has not been tested.** Please make a pull request
-if you create a PDB file processing script.
-
-### Downloading PDB clusters
-To use clustered training data, download the clusters at 30% sequence identity
-at [rcsb](https://www.rcsb.org/docs/programmatic-access/file-download-services#sequence-clusters-data).
-This download link also works at time of writing:
-```
-https://cdn.rcsb.org/resources/sequence/clusters/clusters-by-entity-30.txt
-```
-Place this file in `data/processed_pdb` or anywhere in your file system.
-Update your config to point to the clustered data:
-```yaml
-data:
-  cluster_path: ./data/processed_pdb/clusters-by-entity-30.txt
-```
-To use clustered data, set `sample_mode` to either `cluster_time_batch` or `cluster_length_batch`.
-See next section for details.
-
-### Batching modes
-
-```yaml
-experiment:
-  # Use one of the following.
-
-  # Each batch contains multiple time steps of the same protein.
-  sample_mode: time_batch
-
-  # Each batch contains multiple proteins of the same length.
-  sample_mode: length_batch
-
-  # Each batch contains multiple time steps of a protein from a cluster.
-  sample_mode: cluster_time_batch
-
-  # Each batch contains multiple clusters of the same length.
-  sample_mode: cluster_length_batch
-```
-
-### Launching training 
-`train_se3_diffusion.py` is the training script. It utilizes [Hydra](https://hydra.cc).
-Hydra does a nice thing where it will save the output, config, and overrides of each run to the `outputs/` directory organized by date and time. By default we use 2 GPUs to fit proteins up to length 512. The number of GPUs can be changed with the `num_gpus` field in `base.yml`.
-
-Training can be done with the following.
-```python
-python experiments/train_se3_diffusion.py
-```
-The config for training is in `config/base.yaml`.
-See the config for different training options.
-Training will write losses and additional information in the terminal.
-
-We support wandb which can be turned on by setting the following option in the config.
-
-```yaml
-experiment:
-    use_wandb: True
-```
-
-Multi-run can be achieved with the `-m` flag. The config must specify the sweep.
-For an example, in `config/base.yaml` we can have the following:
-```yaml
-defaults:
-  - override hydra/launcher: joblib
-
-hydra:
-  sweeper:
-    params:
-      model.node_embed_size: 128,256
-```
-This instructs hydra to use [joblib](https://joblib.readthedocs.io/en/latest/)
-as a pipeline for launching a sweep over `data.rosetta.filtering.subset` for two
-different values. You can specify a swep with the `-m` flag. The training script
-will automatically decide which GPUs to use for each sweep. You have to make sure
-enough GPUs are available on your server.
-
-```python
-python experiments/train_se3_diffusion.py -m
-```
-Each training run outputs the following.
-* Model checkpoints are saved to `ckpt`.
-* Hydra logging is saved to `outputs/` including configs and overrides.
-* Samples during intermittent evaluation (see next section) are saved to `eval_outputs`.
-* Wandb outputs are saved to `wandb`.
-
-### Intermittent evaluation
-
-Training also performs evaluation everytime a checkpoint is saved.
-We select equally spaced lengths between the minimum and maximum lengths seen during training and sample multiple backbones for each length.
-These are then evaluated with different metrics such as secondary structure composition, radius of gyration, chain breaks, and clashes.
-
-> We additionally evaluate TM-score of the sample with a selected example from the training set.
-> This was part of a older research effort for something like protein folding.
-> We keep this since it'll likely be useful to others but it can be ignored for 
-> the task of unconditional generation.
-
-All samples and their metrics can be visualized in wandb (if it was turned on).
-The terminal will print the paths to which the checkpoint and samples are saved.
-```bash
-[2023-02-09 15:10:25,097][__main__][INFO] - Checkpoints saved to: <ckpt_path>
-[2022-02-09 15:10:25,097][__main__][INFO] - Evaluation saved to: <sample_path>
-```
-This can also be found in the config in Wandb by searching `ckpt_dir`.
-Once you have a good run, you can copy and save the weights somewhere for inference.
-
-# Acknowledgements
-
-Thank you to the following for pointing out bugs:
-* longlongman
-* amorehead
-
+-----------------------------------------------------------------------------------------------------

@@ -162,7 +162,10 @@ class ScoreNetwork(nn.Module):
 
         self.embedding_layer = Embedder(model_conf)
         self.diffuser = diffuser
-        self.score_model = ipa_pytorch.IpaScore(model_conf, diffuser)
+        self.pred_model = ipa_pytorch.PredModel(model_conf)
+        self.score_model = ipa_pytorch.ScoreModel(diffuser)
+
+        # self.score_model = ipa_pytorch.IpaScore(model_conf, diffuser)
 
     def _apply_mask(self, aatype_diff, aatype_0, diff_mask):
         return diff_mask * aatype_diff + (1 - diff_mask) * aatype_0
@@ -196,18 +199,22 @@ class ScoreNetwork(nn.Module):
 
         # Run main network
         model_out = self.score_model(node_embed, edge_embed, input_feats)
+        node_embed, edge_embed, psi_pred, curr_rigids, init_rigids = (
+            self.pred_model(node_embed, edge_embed, input_feats))
+        rot_score, trans_score = (
+            self.score_model(init_rigids, curr_rigids, input_feats))
 
         # Psi angle prediction
         gt_psi = input_feats['torsion_angles_sin_cos'][..., 2, :]
         psi_pred = self._apply_mask(
-            model_out['psi'], gt_psi, 1 - fixed_mask[..., None])
+            psi_pred, gt_psi, 1 - fixed_mask[..., None])
 
         pred_out = {
             'psi': psi_pred,
-            'rot_score': model_out['rot_score'],
-            'trans_score': model_out['trans_score'],
+            'rot_score': rot_score,
+            'trans_score': trans_score,
         }
-        rigids_pred = model_out['final_rigids']
+        rigids_pred = curr_rigids
         pred_out['rigids'] = rigids_pred.to_tensor_7()
         bb_representations = all_atom.compute_backbone(rigids_pred, psi_pred)
         pred_out['atom37'] = bb_representations[0].to(rigids_pred.device)
